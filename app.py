@@ -6,6 +6,7 @@ import io
 import json
 import time
 import threading
+import platform
 import fitz
 import chromadb
 import streamlit as st
@@ -23,26 +24,68 @@ from langchain_core.documents import Document
 class ProcesamientoCancelado(Exception):
     pass
 
+
 # ─────────────────────────────────────────
-# CONFIG
+# CONFIG  (secrets en Streamlit Cloud, .env en local)
 # ─────────────────────────────────────────
-GROQ_API_KEY    = os.getenv("GROQ_API_KEY")
+def _get_secret(key: str, default=None):
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+
+GROQ_API_KEY    = _get_secret("GROQ_API_KEY")
 CHROMA_PATH     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chroma_db")
 COLLECTION_NAME = "puce_normativa"
-ADMIN_PASSWORD  = os.getenv("ADMIN_PASSWORD")
+ADMIN_PASSWORD  = _get_secret("ADMIN_PASSWORD")
 
-# Si Tesseract no está en el PATH (típico en Windows), descomenta y ajusta:
-import platform
+# Tesseract: en Windows hay que apuntar al .exe; en Linux (Streamlit Cloud) está en el PATH.
 if platform.system() == "Windows":
     pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-# En Linux (Streamlit Cloud) Tesseract queda en el PATH automáticamente
 
 st.set_page_config(page_title="Reglamentos PUCE", page_icon="🎓", layout="wide")
 
 st.markdown("""
 <style>
-    .titulo { font-size: 2rem; font-weight: 700; color: #00d4aa; margin-bottom: 0; }
-    .subtitulo { color: #888; font-size: 0.9rem; margin-top: 0; margin-bottom: 1.5rem; }
+    /* ─── HEADER ─── */
+    .titulo {
+        font-size: 2.4rem; font-weight: 800;
+        background: linear-gradient(90deg, #00d4aa 0%, #00a8d4 50%, #0078d4 100%);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        background-clip: text; margin-bottom: 0;
+    }
+    .subtitulo { color: #888; font-size: 0.95rem; margin-top: 0; margin-bottom: 1.5rem; }
+
+    /* ─── BADGES ─── */
+    .badge {
+        display: inline-block; padding: 3px 10px; border-radius: 12px;
+        font-size: 0.75rem; font-weight: 600; margin-right: 6px;
+    }
+    .badge-doc { background: rgba(0, 212, 170, 0.15); color: #00d4aa; border: 1px solid rgba(0, 212, 170, 0.3); }
+    .badge-art { background: rgba(0, 168, 212, 0.15); color: #00a8d4; border: 1px solid rgba(0, 168, 212, 0.3); }
+    .badge-time { background: rgba(255, 193, 7, 0.15); color: #ffc107; border: 1px solid rgba(255, 193, 7, 0.3); }
+
+    /* ─── QUICK PROMPT CARDS ─── */
+    .qp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin: 12px 0; }
+    .qp-card {
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(0, 212, 170, 0.2);
+        border-radius: 10px; padding: 14px;
+        transition: all 0.2s ease;
+    }
+    .qp-card:hover {
+        border-color: #00d4aa;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 212, 170, 0.15);
+    }
+    .qp-icon { font-size: 1.5rem; margin-bottom: 6px; }
+    .qp-title { font-weight: 600; font-size: 0.9rem; margin-bottom: 4px; }
+    .qp-sub { color: #888; font-size: 0.8rem; }
+
+    /* ─── STEP BOX ─── */
     .step-box {
         background: var(--secondary-background-color); border-left: 3px solid #00d4aa;
         padding: 10px 15px; border-radius: 4px; margin: 6px 0; font-size: 0.9rem;
@@ -50,8 +93,96 @@ st.markdown("""
     .step-done { border-left-color: #28a745; }
     .step-active { border-left-color: #ffc107; }
     .step-ocr { border-left-color: #ff7b00; }
+
+    /* ─── METRIC CARD ─── */
+    .metric-card {
+        background: linear-gradient(135deg, rgba(0, 212, 170, 0.08) 0%, rgba(0, 168, 212, 0.08) 100%);
+        border: 1px solid rgba(0, 212, 170, 0.2);
+        border-radius: 10px; padding: 14px; text-align: center;
+    }
+    .metric-value { font-size: 1.8rem; font-weight: 700; color: #00d4aa; line-height: 1; }
+    .metric-label { font-size: 0.8rem; color: #888; margin-top: 4px; }
+
+    /* ─── HERO WELCOME ─── */
+    .hero-welcome {
+        background: linear-gradient(135deg, rgba(0, 212, 170, 0.05) 0%, rgba(0, 120, 212, 0.05) 100%);
+        border: 1px solid rgba(0, 212, 170, 0.2);
+        border-radius: 14px; padding: 20px; margin-bottom: 16px;
+    }
+
+    /* ─── ANIMATIONS ─── */
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.6; }
+    }
+    .pulsing { animation: pulse 1.5s ease-in-out infinite; }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────
+# CONSTANTES
+# ─────────────────────────────────────────
+DEFAULT_SYSTEM_PROMPT = """Eres un asistente legal experto de los Reglamentos de la PUCE. Respondes con precisión, exhaustividad y claridad.
+
+REGLAS DE CONTENIDO:
+1. Usa ÚNICAMENTE la información de los fragmentos proporcionados.
+2. Si la pregunta pide artículos sobre un tema, LISTA TODOS los artículos relevantes encontrados en los fragmentos, incluyendo de DISTINTOS documentos si los hay. No omitas ninguno.
+3. Si la pregunta es sobre un artículo específico, reproduce su contenido relevante de forma estructurada y completa.
+3b. Si el número de artículo solicitado aparece en MÁS DE UN documento (lo verás porque hay fragmentos con el mismo "Artículo N" y distinto "Documento"), reproduce el contenido de CADA documento por separado, con un encabezado por documento. NUNCA elijas solo uno.
+4. Si hay numerales o listas en el reglamento, preséntalos como lista.
+5. Si la información NO está en los fragmentos, responde EXACTAMENTE: "No encontré información sobre eso en los reglamentos cargados."
+6. NO inventes, NO supongas, NO uses conocimiento externo.
+7. Mantén coherencia con la conversación previa.
+
+REGLAS DE CITACIÓN (OBLIGATORIAS):
+8. SIEMPRE cita el origen al final de cada afirmación con el formato: **[Art. N - Título del artículo - nombre_documento]**
+9. Si combinas información de múltiples artículos o documentos, cita CADA UNO explícitamente.
+10. NUNCA omitas la cita del documento, especialmente cuando hay varios reglamentos cargados.
+11. Si dos artículos del mismo número vienen de documentos distintos, distínguelos.
+
+REGLAS DE FORMATO:
+12. NO incluyas frases como "Artículo reformado por resolución..." en tu respuesta.
+13. Estructura las respuestas largas con encabezados o listas para fácil lectura.
+14. Sé directo: empieza con la respuesta, no con introducciones largas.
+
+CONVERSACIÓN PREVIA (para contexto):
+{historial}
+
+FRAGMENTOS DEL REGLAMENTO:
+{context}
+
+PREGUNTA ACTUAL: {question}
+
+RESPUESTA:"""
+
+
+def exportar_conversacion_md(historial: list) -> str:
+    """Convierte el historial actual a Markdown descargable."""
+    lineas = [
+        "# Conversación · Reglamentos PUCE",
+        f"_Exportado: {time.strftime('%Y-%m-%d %H:%M:%S')}_",
+        "",
+        "---",
+        ""
+    ]
+    for m in historial:
+        rol = "🧑 Usuario" if m["role"] == "user" else "🤖 Asistente"
+        lineas.append(f"### {rol}\n\n{m['content']}\n")
+    return "\n".join(lineas)
+
+
+# ─────────────────────────────────────────
+# QUICK PROMPTS (preguntas sugeridas para el usuario)
+# ─────────────────────────────────────────
+QUICK_PROMPTS = [
+    {"icon": "💰", "title": "Becas y ayudas",       "sub": "Tipos, requisitos y montos",       "q": "¿Qué tipos de becas existen y qué requisitos tienen?"},
+    {"icon": "📉", "title": "Reprobar materias",    "sub": "Tercera matrícula y consecuencias", "q": "¿Qué pasa si repruebo una materia tres veces?"},
+    {"icon": "🎓", "title": "Titulación",           "sub": "Modalidades y requisitos",          "q": "¿Cómo me puedo titular? ¿Qué modalidades existen?"},
+    {"icon": "📝", "title": "Matrícula",            "sub": "Plazos y procedimiento",            "q": "¿Cuál es el procedimiento de matrícula y los plazos?"},
+    {"icon": "⚖️", "title": "Régimen disciplinario","sub": "Faltas y sanciones",                "q": "¿Cuáles son las faltas disciplinarias y sus sanciones?"},
+    {"icon": "♿", "title": "Inclusión",             "sub": "Necesidades específicas",           "q": "¿Qué dice el reglamento sobre estudiantes con discapacidad?"},
+]
 
 
 # ─────────────────────────────────────────
@@ -82,11 +213,6 @@ def get_embeddings():
 # ─────────────────────────────────────────
 # BM25 — SIN @st.cache_resource  (FIX CRÍTICO 1)
 # ─────────────────────────────────────────
-# El parámetro original `_chunks_tuple` (con underscore) hace que Streamlit
-# IGNORE su contenido al cachear. Resultado: siempre devuelve el primer BM25
-# construido. Cuando reprocesas con menos chunks, BM25 mantiene tamaño viejo
-# → IndexError al indexar chunks_datos[i].
-# Reconstruir BM25 toma milisegundos, así que NO se cachea.
 def construir_bm25(chunks):
     if not chunks:
         return None
@@ -144,6 +270,18 @@ _PATRON_DISPOSICION_RUIDO = re.compile(
     re.IGNORECASE
 )
 
+_PATRON_CORTE = re.compile(
+    r'(?=(?:^|\n)[ \t]*(?:'
+    r'Art[ií]culo\s+\d+\s*[\.\-–]'
+    r'|DISPOSICI[OÓ]N(?:ES)?\s+(?:GENERAL(?:ES)?|TRANSITORIA(?:S)?|DEROGATORIA(?:S)?|FINAL)'
+    r'))'
+)
+_ES_ARTICULO   = re.compile(r'^Art[ií]culo\s+\d+\s*[\.\-–]')
+_ES_DISPOSICION = re.compile(
+    r'^DISPOSICI[OÓ]N(?:ES)?\s+(GENERAL(?:ES)?|TRANSITORIA(?:S)?|DEROGATORIA(?:S)?|FINAL)',
+    re.IGNORECASE)
+
+
 def limpiar_lineas(texto: str) -> str:
     texto = _PATRON_LINEA_BASURA.sub("", texto)
     texto = _PATRON_RUIDO_LEGAL.sub("", texto)
@@ -155,15 +293,58 @@ def limpiar_lineas(texto: str) -> str:
 # ─────────────────────────────────────────
 # EXTRACCIÓN HÍBRIDA: TEXTO NATIVO + OCR FALLBACK
 # ─────────────────────────────────────────
+def _rect_dentro(bbox_bloque, rect_tabla, umbral=0.6):
+    """True si el bloque cae mayormente (≥umbral) dentro de la tabla → es texto duplicado de celda."""
+    rb = fitz.Rect(bbox_bloque)
+    rb.normalize()
+    inter = rb & rect_tabla
+    area_b = rb.width * rb.height
+    if inter.is_empty or area_b <= 0:
+        return False
+    area_i = inter.width * inter.height
+    return (area_i / area_b) >= umbral
+
+
 def extraer_texto_pagina_nativo(pagina) -> str:
-    bloques = []
+    # 1) Detectar tablas: sus regiones y su versión en Markdown
+    try:
+        tablas = pagina.find_tables().tables
+    except Exception:
+        tablas = []
+    rects_tabla = [fitz.Rect(t.bbox) for t in tablas]
+    md_tablas   = [t.to_markdown() for t in tablas]
+    emitidas    = [False] * len(tablas)
+
+    partes = []
     for bloque in pagina.get_text("blocks"):
-        if bloque[6] != 0:
+        if bloque[6] != 0:          # solo bloques de texto
             continue
         linea = bloque[4].strip()
-        if linea:
-            bloques.append(linea)
-    return "\n".join(bloques)
+        if not linea:
+            continue
+
+        # 2) ¿El bloque pertenece a alguna tabla?
+        idx = next(
+            (i for i, rt in enumerate(rects_tabla) if _rect_dentro(bloque[:4], rt)),
+            None
+        )
+        if idx is not None:
+            # Insertar la tabla UNA vez (en su posición de lectura) y omitir el texto suelto
+            if not emitidas[idx]:
+                md = md_tablas[idx].strip()
+                if md:
+                    partes.append(md)
+                emitidas[idx] = True
+            continue                # se descarta el texto plano duplicado de la celda
+
+        partes.append(linea)
+
+    # 3) Defensa: si alguna tabla no cruzó con ningún bloque, añadirla al final
+    for i, ok in enumerate(emitidas):
+        if not ok and md_tablas[i].strip():
+            partes.append(md_tablas[i].strip())
+
+    return "\n".join(partes)
 
 
 def extraer_texto_pagina_ocr(pagina) -> str:
@@ -207,13 +388,8 @@ def extraer_texto_completo_pdf(doc_pdf, log_callback=None, cancel_check=None) ->
 
 
 # ─────────────────────────────────────────
-# DIVISIÓN POR ARTÍCULOS  (FIX CRÍTICO 2)
+# DIVISIÓN POR ARTÍCULOS
 # ─────────────────────────────────────────
-# SIN re.IGNORECASE: solo matchea "Artículo" en MAYÚSCULA (los encabezados reales).
-# Las referencias en el considerando usan minúscula:
-#    "Que el artículo 30 de la LOES..."  ← NO matchea ✅
-#    "Artículo 1.- Objeto. ..."          ← SÍ matchea ✅
-# Esto evita contar artículos falsos del CONSIDERANDO (30, 38, 46, 74, 77, etc.).
 _PATRON_ARTICULO = re.compile(
     r'(?=(?:^|\n)[ \t]*Art[ií]culo\s+\d+\s*[\.\-–])'
 )
@@ -222,10 +398,6 @@ _PATRON_ARTICULO = re.compile(
 def recortar_a_cuerpo_normativo(texto: str) -> str:
     """
     Defensa adicional: descarta el preámbulo/CONSIDERANDO del reglamento.
-    El considerando contiene referencias a OTRAS leyes que ensucian la
-    extracción. Buscamos el inicio del cuerpo normativo a través de la
-    primera 'Artículo 1.- Palabra_Capitalizada' (la tabla de contenidos
-    no usa este formato y el considerando usa 'el artículo' en minúscula).
     """
     m = re.search(
         r'(?:^|\n)[ \t]*Art[ií]culo\s+1\s*[\.\-–]\s*[–-]?\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+',
@@ -240,8 +412,8 @@ def dividir_en_articulos(texto: str, nombre_doc: str) -> list[Document]:
     # 1) Descartar preámbulo/CONSIDERANDO
     texto = recortar_a_cuerpo_normativo(texto)
 
-    # 2) Dividir por encabezados de artículo (solo Artículo en mayúscula)
-    partes = _PATRON_ARTICULO.split(texto)
+    # 2) Dividir por artículos Y disposiciones
+    partes = _PATRON_CORTE.split(texto)
     documentos = []
 
     for parte in partes:
@@ -249,40 +421,47 @@ def dividir_en_articulos(texto: str, nombre_doc: str) -> list[Document]:
         if not parte or len(parte) < 50:
             continue
 
-        # Validación dura: el chunk DEBE empezar con "Artículo N..."
-        # Esto descarta el primer split (texto antes del primer artículo).
-        if not re.match(r'^Art[ií]culo\s+\d+\s*[\.\-–]', parte):
+        if _ES_ARTICULO.match(parte):
+            m = re.match(
+                r'Art[ií]culo\s+(\d+)\s*[\.\-–]\s*[–-]?\s*([^\n.]{2,120})',
+                parte
+            )
+            if m:
+                num_art = m.group(1)
+                titulo_art = m.group(2).strip().rstrip('.').strip()
+                titulo_art = re.sub(r'^[\-–\s]+', '', titulo_art)
+            else:
+                m2 = re.match(r'Art[ií]culo\s+(\d+)', parte)
+                num_art = m2.group(1) if m2 else "?"
+                titulo_art = ""
+
+            meta_base = {
+                "source": nombre_doc,
+                "articulo": num_art,
+                "titulo": titulo_art[:150]
+            }
+
+            if len(parte) > 2500:
+                encabezado = parte[:200]
+                sub_chunks = [parte[i:i+2000] for i in range(0, len(parte), 1800)]
+                for j, sub in enumerate(sub_chunks):
+                    contenido = sub if j == 0 else f"[{encabezado[:80]}...]\n{sub}"
+                    meta = {**meta_base, "sub_chunk": j}
+                    documentos.append(Document(page_content=contenido, metadata=meta))
+            else:
+                documentos.append(Document(page_content=parte, metadata=meta_base))
+
+        elif _ES_DISPOSICION.match(parte):
+            tipo_disp = _ES_DISPOSICION.match(parte).group(1).capitalize()
+            meta = {
+                "source": nombre_doc,
+                "articulo": "—",
+                "titulo": f"Disposiciones {tipo_disp}"
+            }
+            documentos.append(Document(page_content=parte, metadata=meta))
+
+        else:
             continue
-
-        # Extraer número Y título (sin IGNORECASE: ya garantizamos mayúscula)
-        m = re.match(
-            r'Art[ií]culo\s+(\d+)\s*[\.\-–]\s*[–-]?\s*([^\n.]{2,120})',
-            parte
-        )
-        if m:
-            num_art = m.group(1)
-            titulo_art = m.group(2).strip().rstrip('.').strip()
-            titulo_art = re.sub(r'^[\-–\s]+', '', titulo_art)
-        else:
-            m2 = re.match(r'Art[ií]culo\s+(\d+)', parte)
-            num_art = m2.group(1) if m2 else "?"
-            titulo_art = ""
-
-        meta_base = {
-            "source": nombre_doc,
-            "articulo": num_art,
-            "titulo": titulo_art[:150]
-        }
-
-        if len(parte) > 2500:
-            encabezado = parte[:200]
-            sub_chunks = [parte[i:i+2000] for i in range(0, len(parte), 1800)]
-            for j, sub in enumerate(sub_chunks):
-                contenido = sub if j == 0 else f"[{encabezado[:80]}...]\n{sub}"
-                meta = {**meta_base, "sub_chunk": j}
-                documentos.append(Document(page_content=contenido, metadata=meta))
-        else:
-            documentos.append(Document(page_content=parte, metadata=meta_base))
 
     return documentos
 
@@ -339,7 +518,7 @@ def es_charla_no_consulta(pregunta: str) -> bool:
 
 
 # ─────────────────────────────────────────
-# DETECCIÓN DE META-PREGUNTAS  (sobre la estructura del corpus)
+# DETECCIÓN DE META-PREGUNTAS
 # ─────────────────────────────────────────
 _PATRON_CONTAR_ARTS = re.compile(
     r'(cu[aá]ntos?\s+art[ií]culos?'
@@ -415,7 +594,7 @@ def _agrupar_arts_por_doc(chunks_fuentes, chunks_arts, chunks_titulos, indices=N
         doc = chunks_fuentes[i]
         art = chunks_arts[i]
         tit = chunks_titulos[i] or ""
-        if art == "?" or not art:
+        if art == "?" or not art or art == "—":
             continue
         por_doc.setdefault(doc, {})
         if art not in por_doc[doc] or (not por_doc[doc][art] and tit):
@@ -566,8 +745,25 @@ JSON:"""
         }
 
 
+def _norm_doc(s):
+    return re.sub(r'[\s\-_]+', ' ', s.lower()).strip()
+
+
+def _doc_coincide(filtro, fuente):
+    if not filtro:
+        return False
+    f, src = _norm_doc(filtro), _norm_doc(fuente)
+    if f in src:
+        return True
+    if "beca" in f:
+        return "beca" in src
+    if "general" in f or "estudiante" in f:
+        return ("general" in src or "estudiante" in src) and "beca" not in src
+    return False
+
+
 # ─────────────────────────────────────────
-# RECUPERACIÓN HÍBRIDA  (con bounds-check defensivo)
+# RECUPERACIÓN HÍBRIDA
 # ─────────────────────────────────────────
 def recuperar_contexto(pregunta: str, vectorstore, chunks_datos: list, bm25, llm,
                        historial: list = None) -> tuple[str, dict]:
@@ -578,12 +774,18 @@ def recuperar_contexto(pregunta: str, vectorstore, chunks_datos: list, bm25, llm
     intencion["pregunta_original"] = pregunta
     intencion["pregunta_contextualizada"] = pregunta_ctx
 
+    if intencion["tipo"] != "comparativa":
+        if not any(_doc_coincide(intencion["documento_filtro"], d) for d in documentos_disponibles):
+            intencion["documento_filtro"] = detectar_doc_filtro(pregunta_ctx, documentos_disponibles)
+    else:
+        intencion["documento_filtro"] = ""   # forzar búsqueda en todo el corpus
+
     if intencion["tipo"] == "saludo":
         return "", intencion
 
     if intencion["documento_filtro"]:
         filtro = intencion["documento_filtro"]
-        chunks_filtrados = [c for c in chunks_datos if filtro in c[1].lower()]
+        chunks_filtrados = [c for c in chunks_datos if _doc_coincide(filtro, c[1])]
         chunks_busqueda = chunks_filtrados or chunks_datos
     else:
         chunks_busqueda = chunks_datos
@@ -603,7 +805,7 @@ def recuperar_contexto(pregunta: str, vectorstore, chunks_datos: list, bm25, llm
             if str(art) == str(num):
                 agregar(texto, fuente, art, titulo, score=10000.0)
 
-    # 6. BM25  (con verificación de coherencia + bounds-check defensivo)
+    # 6. BM25
     query_lexica = " ".join(intencion["temas"]) + " " + intencion["reformulada"]
     tokens = re.findall(r'\b\w+\b', query_lexica.lower())
     if tokens and bm25 is not None:
@@ -612,16 +814,15 @@ def recuperar_contexto(pregunta: str, vectorstore, chunks_datos: list, bm25, llm
         except Exception:
             scores = []
 
-        # FIX: solo usar BM25 si su corpus coincide con chunks_datos
         if len(scores) == len(chunks_datos):
             top_idx = sorted(range(len(scores)), key=lambda i: -scores[i])[:12]
             for i in top_idx:
-                if i >= len(chunks_datos):  # defensivo extra
+                if i >= len(chunks_datos):
                     continue
                 if scores[i] <= 0:
                     continue
                 texto, fuente, art, titulo = chunks_datos[i]
-                if intencion["documento_filtro"] and intencion["documento_filtro"] not in fuente.lower():
+                if intencion["documento_filtro"] and not _doc_coincide(intencion["documento_filtro"], fuente):
                     continue
                 agregar(texto, fuente, art, titulo, score=float(scores[i]))
         else:
@@ -632,7 +833,7 @@ def recuperar_contexto(pregunta: str, vectorstore, chunks_datos: list, bm25, llm
         filter_meta = None
         if intencion["documento_filtro"]:
             for f in documentos_disponibles:
-                if intencion["documento_filtro"] in f.lower():
+                if _doc_coincide(intencion["documento_filtro"], f):
                     filter_meta = {"source": f}
                     break
 
@@ -715,7 +916,6 @@ def procesar_pdfs(archivos):
         articulos = dividir_en_articulos(texto_completo, nombre_doc)
         docs_langchain.extend(articulos)
 
-        # Diagnóstico: artículos únicos por PDF
         arts_unicos = sorted(
             {d.metadata.get("articulo", "?") for d in articulos
              if d.metadata.get("articulo") != "?"},
@@ -753,12 +953,10 @@ def procesar_pdfs(archivos):
         collection_name=COLLECTION_NAME
     )
 
-    # BM25 sin cache → siempre coherente con chunks_texto
     st.session_state.bm25 = construir_bm25(st.session_state.chunks_texto)
 
     progress.progress(100, text="¡Completado!")
 
-    # Resumen final
     por_doc_summary = _agrupar_arts_por_doc(
         st.session_state.chunks_fuentes,
         st.session_state.chunks_arts,
@@ -774,13 +972,9 @@ def procesar_pdfs(archivos):
 
 
 # ─────────────────────────────────────────
-# WORKER THREADED (sin st.* — actualiza un dict compartido)
+# WORKER THREADED
 # ─────────────────────────────────────────
 def procesar_pdfs_worker(archivos_data: list, state: dict):
-    """
-    Corre en hilo de fondo. archivos_data: list of (nombre, bytes).
-    Escribe progreso en state; el hilo principal lee state y actualiza la UI.
-    """
     try:
         client = get_chroma_client()
         try:
@@ -879,6 +1073,10 @@ if "procesando" not in st.session_state:
     st.session_state.procesando = False
 if "progress_state" not in st.session_state:
     st.session_state.progress_state = {}
+if "prompt_inyectado" not in st.session_state:
+    st.session_state.prompt_inyectado = None
+if "ultima_pregunta_ts" not in st.session_state:
+    st.session_state.ultima_pregunta_ts = {}
 
 if "chunks_texto" not in st.session_state or not st.session_state.get("chunks_texto"):
     if st.session_state.get("vectorstore") and db_tiene_datos():
@@ -954,6 +1152,47 @@ with st.sidebar:
                 st.caption(f"• **{d}** — {len(arts)} artículos")
 
         st.divider()
+
+        # ── 🔍 BUSCADOR RÁPIDO DE ARTÍCULOS ──
+        with st.expander("🔍 Buscar artículo directo"):
+            pares = []
+            vistos_arts = set()
+            for f, a, t in zip(
+                st.session_state.chunks_fuentes,
+                st.session_state.chunks_arts,
+                st.session_state.chunks_titulos,
+            ):
+                clave = (f, a)
+                if a == "?" or clave in vistos_arts:
+                    continue
+                vistos_arts.add(clave)
+                pares.append((f, a, t))
+            try:
+                pares.sort(key=lambda x: (x[0], int(x[1])))
+            except (ValueError, TypeError):
+                pares.sort(key=lambda x: (x[0], str(x[1])))
+
+            opciones = ["— elige —"] + [
+                f"📚 {f[:30]}… · Art. {a}" + (f" — {t[:30]}" if t else "")
+                for f, a, t in pares
+            ]
+            sel = st.selectbox("Salta a un artículo:", opciones, key="quick_art_select")
+            if sel != "— elige —":
+                idx_sel = opciones.index(sel) - 1
+                doc_sel, art_sel, _ = pares[idx_sel]
+                if st.button("📖 Ver contenido", use_container_width=True, key="btn_ver_art"):
+                    st.session_state.prompt_inyectado = f"Muéstrame el artículo {art_sel} del reglamento {doc_sel}"
+                    st.rerun()
+
+        # ── 💾 EXPORTAR CONVERSACIÓN ──
+        if st.session_state.historial:
+            st.download_button(
+                "💾 Exportar conversación",
+                data=exportar_conversacion_md(st.session_state.historial),
+                file_name=f"conversacion_puce_{time.strftime('%Y%m%d_%H%M')}.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
 
         if st.session_state.es_admin:
             # ── Panel de administración ──
@@ -1099,18 +1338,50 @@ with st.sidebar:
             st.rerun()
 
 
-# ─── Chat ───
+# ─────────────────────────────────────────
+# CHAT
+# ─────────────────────────────────────────
 if not st.session_state.vectorstore:
     if st.session_state.es_admin:
         st.info("👈 Sube uno o más PDFs en el panel lateral y pulsa **Procesar PDFs** para comenzar.", icon="📋")
     else:
         st.info("📚 Los reglamentos aún no están disponibles. Por favor, contacta a un administrador.", icon="🎓")
 else:
-    for msg in st.session_state.historial:
+    # ── HERO + QUICK PROMPTS si no hay historial ──
+    if not st.session_state.historial and not st.session_state.prompt_inyectado:
+        st.markdown(
+            '<div class="hero-welcome">'
+            '<h3 style="margin:0">👋 Hola, ¿qué quieres consultar hoy?</h3>'
+            '<p style="color:#888;margin:6px 0 0">Pregunta libremente o elige una sugerencia para empezar.</p>'
+            '</div>',
+            unsafe_allow_html=True
+        )
+        st.markdown("##### ✨ Sugerencias rápidas")
+        cols = st.columns(3)
+        for i, qp in enumerate(QUICK_PROMPTS):
+            with cols[i % 3]:
+                if st.button(
+                    f"{qp['icon']}  **{qp['title']}**\n\n{qp['sub']}",
+                    use_container_width=True,
+                    key=f"qp_{i}",
+                ):
+                    st.session_state.prompt_inyectado = qp["q"]
+                    st.rerun()
+
+    # ── HISTORIAL ──
+    for idx, msg in enumerate(st.session_state.historial):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+            if msg["role"] == "assistant" and idx > 0:
+                tiempo = st.session_state.ultima_pregunta_ts.get(idx)
+                if tiempo:
+                    st.caption(f"⏱️ {tiempo:.1f}s")
 
-    pregunta = st.chat_input("¿Qué quieres saber del reglamento?")
+    # ── INPUT: chat normal O prompt inyectado por quick-prompt ──
+    pregunta_chat = st.chat_input("¿Qué quieres saber del reglamento?")
+    pregunta = st.session_state.prompt_inyectado or pregunta_chat
+    if st.session_state.prompt_inyectado:
+        st.session_state.prompt_inyectado = None
 
     if pregunta:
         st.session_state.historial.append({"role": "user", "content": pregunta})
@@ -1162,6 +1433,7 @@ else:
                 st.stop()
 
             # ── 3) CONSULTAS DE CONTENIDO (RAG normal) ───
+            t0 = time.time()
             with st.spinner("Analizando los reglamentos..."):
                 chunks_datos = list(zip(
                     st.session_state.chunks_texto,
@@ -1173,7 +1445,7 @@ else:
                 llm = ChatGroq(
                     groq_api_key=GROQ_API_KEY,
                     model_name="llama-3.3-70b-versatile",
-                    temperature=0
+                    temperature=0,
                 )
 
                 historial_previo = st.session_state.historial[:-1]
@@ -1216,37 +1488,7 @@ else:
                         for m in ultimas
                     ])
 
-                template = """Eres un asistente legal experto de los Reglamentos de la PUCE. Respondes con precisión, exhaustividad y claridad.
-
-REGLAS DE CONTENIDO:
-1. Usa ÚNICAMENTE la información de los fragmentos proporcionados.
-2. Si la pregunta pide artículos sobre un tema, LISTA TODOS los artículos relevantes encontrados en los fragmentos, incluyendo de DISTINTOS documentos si los hay. No omitas ninguno.
-3. Si la pregunta es sobre un artículo específico, reproduce su contenido relevante de forma estructurada y completa.
-4. Si hay numerales o listas en el reglamento, preséntalos como lista.
-5. Si la información NO está en los fragmentos, responde EXACTAMENTE: "No encontré información sobre eso en los reglamentos cargados."
-6. NO inventes, NO supongas, NO uses conocimiento externo.
-7. Mantén coherencia con la conversación previa.
-
-REGLAS DE CITACIÓN (OBLIGATORIAS):
-8. SIEMPRE cita el origen al final de cada afirmación con el formato: **[Art. N - Título del artículo - nombre_documento]**
-9. Si combinas información de múltiples artículos o documentos, cita CADA UNO explícitamente.
-10. NUNCA omitas la cita del documento, especialmente cuando hay varios reglamentos cargados.
-11. Si dos artículos del mismo número vienen de documentos distintos, distínguelos: "[Art. 29 - Categorías - reglamento-general]" vs "[Art. 29 - X - reglamento-becas]".
-
-REGLAS DE FORMATO:
-12. NO incluyas frases como "Artículo reformado por resolución..." en tu respuesta.
-13. Estructura las respuestas largas con encabezados o listas para fácil lectura.
-14. Sé directo: empieza con la respuesta, no con introducciones largas.
-
-CONVERSACIÓN PREVIA (para contexto):
-{historial}
-
-FRAGMENTOS DEL REGLAMENTO:
-{context}
-
-PREGUNTA ACTUAL: {question}
-
-RESPUESTA:"""
+                template = DEFAULT_SYSTEM_PROMPT
 
                 prompt = PromptTemplate(
                     template=template,
@@ -1254,10 +1496,20 @@ RESPUESTA:"""
                 )
                 chain = prompt | llm | StrOutputParser()
 
-                respuesta = chain.invoke({
+                payload = {
                     "historial": historial_texto if historial_texto else "(Primera pregunta)",
                     "context": contexto,
-                    "question": pregunta
-                })
-                st.markdown(respuesta)
+                    "question": pregunta,
+                }
+
+                # ── STREAMING: respuesta palabra-por-palabra ──
+                try:
+                    respuesta = st.write_stream(chain.stream(payload))
+                except Exception:
+                    respuesta = chain.invoke(payload)
+                    st.markdown(respuesta)
+
+                tiempo_s = time.time() - t0
                 st.session_state.historial.append({"role": "assistant", "content": respuesta})
+                st.session_state.ultima_pregunta_ts[len(st.session_state.historial) - 1] = tiempo_s
+                st.rerun()
