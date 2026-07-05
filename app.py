@@ -646,7 +646,7 @@ def responder_meta_pregunta(tipo, chunks_fuentes, chunks_arts, chunks_titulos, d
         return "\n".join(partes)
 
     if tipo == "contar_documentos":
-        docs = sorted(set(chunks_fuentes))
+        docs = sorted(por_doc.keys())   # usa solo los docs que pasaron el filtro
         partes = [f"Hay **{len(docs)} reglamento(s)** cargado(s):\n"]
         for d in docs:
             arts_unicos = len(por_doc.get(d, {}))
@@ -661,15 +661,13 @@ def responder_meta_pregunta(tipo, chunks_fuentes, chunks_arts, chunks_titulos, d
             partes.append(f"- 📚 **{d}** — {arts_unicos} artículos")
         return "\n".join(partes)
 
-    if tipo == "listar_articulos":
-        partes = []
-        for doc in sorted(por_doc.keys()):
-            arts = por_doc[doc]
-            items_ord = _ordenar_arts(arts)
-            partes.append(f"\n### 📚 {doc}  —  {len(arts)} artículos\n")
-            for num, tit in items_ord:
-                partes.append(f"- **Art. {num}** — {tit}" if tit else f"- **Art. {num}**")
-        return "\n".join(partes).strip()
+    if tipo == "listar_documentos":
+        docs = sorted(por_doc.keys())   # antes: sorted(set(chunks_fuentes))
+        partes = [f"**Reglamentos cargados ({len(docs)}):**\n"]
+        for d in docs:
+            arts_unicos = len(por_doc.get(d, {}))
+            partes.append(f"- 📚 **{d}** — {arts_unicos} artículos")
+        return "\n".join(partes)
 
     if tipo == "indice":
         partes = ["## 📑 Índice de los reglamentos\n"]
