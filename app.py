@@ -669,6 +669,16 @@ def responder_meta_pregunta(tipo, chunks_fuentes, chunks_arts, chunks_titulos, d
             partes.append(f"- 📚 **{d}** — {arts_unicos} artículos")
         return "\n".join(partes)
 
+    if tipo == "listar_articulos":
+        partes = []
+        for doc in sorted(por_doc.keys()):
+            arts = por_doc[doc]
+            items_ord = _ordenar_arts(arts)
+            partes.append(f"## 📋 Artículos de **{doc}** — {len(arts)} artículos\n")
+            for num, tit in items_ord:
+                partes.append(f"- Art. {num}" + (f" — {tit}" if tit else ""))
+        return "\n".join(partes)
+
     if tipo == "indice":
         partes = ["## 📑 Índice de los reglamentos\n"]
         for doc in sorted(por_doc.keys()):
@@ -1320,13 +1330,15 @@ with st.sidebar:
     st.divider()
     if not st.session_state.es_admin:
         with st.expander("🔐 Acceso administrador"):
-            pwd = st.text_input("Contraseña:", type="password", key="pwd_input")
-            if st.button("Ingresar", use_container_width=True):
-                if pwd == ADMIN_PASSWORD:
-                    st.session_state.es_admin = True
-                    st.rerun()
-                else:
-                    st.error("Contraseña incorrecta")
+            with st.form("admin_login_form"):
+                pwd = st.text_input("Contraseña:", type="password", key="pwd_input")
+                submitted = st.form_submit_button("Ingresar", use_container_width=True)
+                if submitted:
+                    if pwd == ADMIN_PASSWORD:
+                        st.session_state.es_admin = True
+                        st.rerun()
+                    else:
+                        st.error("Contraseña incorrecta")
     else:
         st.success("Modo administrador activo ✅")
         if st.button("Cerrar sesión admin", use_container_width=True):
