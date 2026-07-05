@@ -649,8 +649,7 @@ def responder_meta_pregunta(tipo, chunks_fuentes, chunks_arts, chunks_titulos, d
         docs = sorted(set(chunks_fuentes))
         partes = [f"Hay **{len(docs)} reglamento(s)** cargado(s):\n"]
         for d in docs:
-            arts_unicos = len({chunks_arts[i] for i in range(len(chunks_fuentes))
-                               if chunks_fuentes[i] == d and chunks_arts[i] != "?"})
+            arts_unicos = len(por_doc.get(d, {}))
             partes.append(f"- **{d}** — {arts_unicos} artículos")
         return "\n".join(partes)
 
@@ -658,8 +657,7 @@ def responder_meta_pregunta(tipo, chunks_fuentes, chunks_arts, chunks_titulos, d
         docs = sorted(set(chunks_fuentes))
         partes = [f"**Reglamentos cargados ({len(docs)}):**\n"]
         for d in docs:
-            arts_unicos = len({chunks_arts[i] for i in range(len(chunks_fuentes))
-                               if chunks_fuentes[i] == d and chunks_arts[i] != "?"})
+            arts_unicos = len(por_doc.get(d, {}))
             partes.append(f"- 📚 **{d}** — {arts_unicos} artículos")
         return "\n".join(partes)
 
