@@ -533,8 +533,10 @@ _PATRON_CONTAR_DOCS = re.compile(
     re.IGNORECASE
 )
 _PATRON_LISTAR_ARTS = re.compile(
-    r'(lista|list[aá]me|enum[eé]rame|enumera|listado|d[aá]me\s+(la\s+)?lista|todos\s+los?)'
-    r'\s+(los?\s+)?art[ií]culos?',
+    r'(listar(me)?|lista|list[aá]me|listeme|enumerar(me)?|enum[eé]rame|enumera|listado|'
+    r'muestra|mu[eé]strame|ense[ñn]ame|quiero\s+ver|necesito\s+ver|'
+    r'd[aá]me\s+(un\s+|la\s+)?lista|todos\s+los?|cu[aá]les\s+son)'
+    r'\s+(de\s+)?(los?\s+|las?\s+)?(art[ií]culos?|arts?\.?)(?![a-záéíóúñ])',
     re.IGNORECASE
 )
 _PATRON_LISTAR_DOCS = re.compile(
@@ -705,7 +707,7 @@ DOCUMENTOS DISPONIBLES: {docs}
 Pregunta: "{pregunta}"
 
 Devuelve EXACTAMENTE:
-{{"tipo":"articulo|tema|comparativa|saludo|ambigua",
+{{"tipo":"articulo|tema|comparativa|saludo|ambigua|listar_articulos|contar_articulos|listar_documentos|contar_documentos|indice",
   "articulos":[lista_numeros],
   "temas":["concepto","sinonimo1","sinonimo2"],
   "documento_filtro":"nombre_doc_si_lo_menciona_o_vacio",
@@ -716,6 +718,12 @@ Reglas:
 - "temas": expandir con sinónimos en español. Para becas incluir: beca, ayuda económica, subvención, FOPEDEUPO. Para discapacidad: discapacidad, inclusión, necesidades específicas. Etc.
 - "documento_filtro": SOLO si el usuario menciona un documento específico ("en el reglamento de becas...", "del reglamento general..."), si no, vacío
 - "tipo": "comparativa" si pide comparar/diferenciar dos cosas; "saludo" si es solo saludo
+- "tipo":"listar_articulos" si pide el LISTADO COMPLETO de artículos de un reglamento (no un tema puntual)
+- "tipo":"contar_articulos" si pregunta CUÁNTOS artículos tiene un reglamento (cantidad, no el listado)
+- "tipo":"listar_documentos" si pregunta QUÉ reglamentos/documentos hay cargados
+- "tipo":"contar_documentos" si pregunta CUÁNTOS reglamentos/documentos hay cargados
+- "tipo":"indice" si pide la estructura, tabla de contenidos o índice de un reglamento
+- Para los 5 tipos meta anteriores, deja "articulos" y "temas" vacíos
 
 Ejemplos:
 - "art 29" → {{"tipo":"articulo","articulos":[29],"temas":[],"documento_filtro":"","reformulada":"contenido del artículo 29"}}
@@ -726,6 +734,11 @@ Ejemplos:
 - "qué dice el reglamento de becas sobre pérdida" → {{"tipo":"tema","articulos":[],"temas":["pérdida","beca","causales"],"documento_filtro":"becas","reformulada":"causales de pérdida de beca según reglamento de becas"}}
 - "qué pasa si repruebo 3 veces" → {{"tipo":"tema","articulos":[],"temas":["tercera matrícula","reprobar","repetir"],"documento_filtro":"","reformulada":"consecuencias de reprobar tres veces"}}
 - "como me titulo" → {{"tipo":"tema","articulos":[],"temas":["titulación","graduación","integración curricular","examen complexivo"],"documento_filtro":"","reformulada":"requisitos de titulación"}}
+- "cuales son todos los art que tiene el reglamento general" → {{"tipo":"listar_articulos","articulos":[],"temas":[],"documento_filtro":"general","reformulada":"listado completo de artículos del reglamento general"}}
+- "dime cuantos art hay en el de becas" → {{"tipo":"contar_articulos","articulos":[],"temas":[],"documento_filtro":"becas","reformulada":"número de artículos del reglamento de becas"}}
+- "que normativas manejas" → {{"tipo":"listar_documentos","articulos":[],"temas":[],"documento_filtro":"","reformulada":"reglamentos disponibles"}}
+- "con cuantos reglamentos cuentas" → {{"tipo":"contar_documentos","articulos":[],"temas":[],"documento_filtro":"","reformulada":"cantidad de reglamentos disponibles"}}
+- "como esta estructurado el reglamento de becas" → {{"tipo":"indice","articulos":[],"temas":[],"documento_filtro":"becas","reformulada":"estructura del reglamento de becas"}}
 
 JSON:"""
 
@@ -751,6 +764,9 @@ JSON:"""
         }
 
 
+META_TIPOS = {"listar_articulos", "contar_articulos", "listar_documentos", "contar_documentos", "indice"}
+
+
 def _norm_doc(s):
     return re.sub(r'[\s\-_]+', ' ', s.lower()).strip()
 
@@ -768,15 +784,26 @@ def _doc_coincide(filtro, fuente):
     return False
 
 
+def resolver_doc_filtro(intencion: dict, pregunta_ctx: str, documentos_disponibles: list) -> str:
+    """Devuelve el nombre exacto (source) del documento filtrado, o '' si no aplica a ninguno."""
+    for d in documentos_disponibles:
+        if _doc_coincide(intencion.get("documento_filtro", ""), d):
+            return d
+    return detectar_doc_filtro(pregunta_ctx, documentos_disponibles)
+
+
 # ─────────────────────────────────────────
 # RECUPERACIÓN HÍBRIDA
 # ─────────────────────────────────────────
 def recuperar_contexto(pregunta: str, vectorstore, chunks_datos: list, bm25, llm,
-                       historial: list = None) -> tuple[str, dict]:
-    pregunta_ctx = contextualizar_pregunta(pregunta, historial or [], llm)
+                       historial: list = None, pregunta_ctx: str = None,
+                       intencion: dict = None) -> tuple[str, dict]:
+    if pregunta_ctx is None:
+        pregunta_ctx = contextualizar_pregunta(pregunta, historial or [], llm)
     documentos_disponibles = sorted(set(c[1] for c in chunks_datos))
 
-    intencion = clasificar_intencion(pregunta_ctx, llm, documentos_disponibles)
+    if intencion is None:
+        intencion = clasificar_intencion(pregunta_ctx, llm, documentos_disponibles)
     intencion["pregunta_original"] = pregunta
     intencion["pregunta_contextualizada"] = pregunta_ctx
 
@@ -1440,7 +1467,7 @@ else:
                 st.session_state.historial.append({"role": "assistant", "content": respuesta})
                 st.stop()
 
-            # ── 3) CONSULTAS DE CONTENIDO (RAG normal) ───
+            # ── 3) CLASIFICACIÓN LLM + CONSULTAS DE CONTENIDO ───
             t0 = time.time()
             with st.spinner("Analizando los reglamentos..."):
                 chunks_datos = list(zip(
@@ -1457,67 +1484,102 @@ else:
                 )
 
                 historial_previo = st.session_state.historial[:-1]
+                documentos_disponibles = sorted(set(st.session_state.chunks_fuentes))
 
-                contexto, intencion = recuperar_contexto(
-                    pregunta,
-                    st.session_state.vectorstore,
-                    chunks_datos,
-                    st.session_state.bm25,
-                    llm,
-                    historial=historial_previo
-                )
+                pregunta_ctx = contextualizar_pregunta(pregunta, historial_previo, llm)
+                intencion = clasificar_intencion(pregunta_ctx, llm, documentos_disponibles)
+                intencion["pregunta_original"] = pregunta
+                intencion["pregunta_contextualizada"] = pregunta_ctx
 
+                # El regex no reconoció la frase, pero el LLM la clasificó como meta-pregunta
+                es_meta_llm = intencion["tipo"] in META_TIPOS
+                if es_meta_llm:
+                    doc_filtro_meta = resolver_doc_filtro(intencion, pregunta_ctx, documentos_disponibles)
+                    respuesta_meta = responder_meta_pregunta(
+                        intencion["tipo"],
+                        st.session_state.chunks_fuentes,
+                        st.session_state.chunks_arts,
+                        st.session_state.chunks_titulos,
+                        doc_filtro=doc_filtro_meta,
+                    )
+                    contexto = None
+                else:
+                    contexto, intencion = recuperar_contexto(
+                        pregunta,
+                        st.session_state.vectorstore,
+                        chunks_datos,
+                        st.session_state.bm25,
+                        llm,
+                        historial=historial_previo,
+                        pregunta_ctx=pregunta_ctx,
+                        intencion=intencion,
+                    )
+            # ── fin del spinner: a partir de aquí ya se puede renderizar y frenar sin dejarlo pegado ───
+
+            if es_meta_llm:
                 if st.session_state.es_admin:
                     with st.expander("🔬 Cómo entendí tu pregunta", expanded=False):
                         st.json({
-                            "pregunta_original": intencion.get("pregunta_original"),
-                            "pregunta_reformulada": intencion.get("pregunta_contextualizada"),
-                            "tipo": intencion.get("tipo"),
-                            "articulos": intencion.get("articulos"),
-                            "temas": intencion.get("temas"),
-                            "documento_filtro": intencion.get("documento_filtro") or "(todos)",
-                            "fragmentos_recuperados": contexto.count("---") + 1 if contexto else 0,
+                            "pregunta_original": pregunta,
+                            "tipo_meta": intencion["tipo"],
+                            "documento_filtro": doc_filtro_meta or "(todos)",
+                            "fuente_respuesta": "metadata indexada (clasificador LLM, no RAG)",
                         })
+                st.markdown(respuesta_meta)
+                st.session_state.historial.append({"role": "assistant", "content": respuesta_meta})
+                st.stop()
 
-                if intencion["tipo"] == "saludo" or not contexto:
-                    respuesta = (
-                        "No encontré información sobre eso en los reglamentos cargados. "
-                        "¿Puedes reformular tu pregunta o indicar qué tema buscas?"
-                    )
-                    st.markdown(respuesta)
-                    st.session_state.historial.append({"role": "assistant", "content": respuesta})
-                    st.stop()
+            if st.session_state.es_admin:
+                with st.expander("🔬 Cómo entendí tu pregunta", expanded=False):
+                    st.json({
+                        "pregunta_original": intencion.get("pregunta_original"),
+                        "pregunta_reformulada": intencion.get("pregunta_contextualizada"),
+                        "tipo": intencion.get("tipo"),
+                        "articulos": intencion.get("articulos"),
+                        "temas": intencion.get("temas"),
+                        "documento_filtro": intencion.get("documento_filtro") or "(todos)",
+                        "fragmentos_recuperados": contexto.count("---") + 1 if contexto else 0,
+                    })
 
-                historial_texto = ""
-                if historial_previo:
-                    ultimas = historial_previo[-4:]
-                    historial_texto = "\n\n".join([
-                        f"{'Usuario' if m['role']=='user' else 'Asistente'}: {m['content']}"
-                        for m in ultimas
-                    ])
-
-                template = DEFAULT_SYSTEM_PROMPT
-
-                prompt = PromptTemplate(
-                    template=template,
-                    input_variables=["historial", "context", "question"]
+            if intencion["tipo"] == "saludo" or not contexto:
+                respuesta = (
+                    "No encontré información sobre eso en los reglamentos cargados. "
+                    "¿Puedes reformular tu pregunta o indicar qué tema buscas?"
                 )
-                chain = prompt | llm | StrOutputParser()
-
-                payload = {
-                    "historial": historial_texto if historial_texto else "(Primera pregunta)",
-                    "context": contexto,
-                    "question": pregunta,
-                }
-
-                # ── STREAMING: respuesta palabra-por-palabra ──
-                try:
-                    respuesta = st.write_stream(chain.stream(payload))
-                except Exception:
-                    respuesta = chain.invoke(payload)
-                    st.markdown(respuesta)
-
-                tiempo_s = time.time() - t0
+                st.markdown(respuesta)
                 st.session_state.historial.append({"role": "assistant", "content": respuesta})
-                st.session_state.ultima_pregunta_ts[len(st.session_state.historial) - 1] = tiempo_s
-                st.rerun()
+                st.stop()
+
+            historial_texto = ""
+            if historial_previo:
+                ultimas = historial_previo[-4:]
+                historial_texto = "\n\n".join([
+                    f"{'Usuario' if m['role']=='user' else 'Asistente'}: {m['content']}"
+                    for m in ultimas
+                ])
+
+            template = DEFAULT_SYSTEM_PROMPT
+
+            prompt = PromptTemplate(
+                template=template,
+                input_variables=["historial", "context", "question"]
+            )
+            chain = prompt | llm | StrOutputParser()
+
+            payload = {
+                "historial": historial_texto if historial_texto else "(Primera pregunta)",
+                "context": contexto,
+                "question": pregunta,
+            }
+
+            # ── STREAMING: respuesta palabra-por-palabra ──
+            try:
+                respuesta = st.write_stream(chain.stream(payload))
+            except Exception:
+                respuesta = chain.invoke(payload)
+                st.markdown(respuesta)
+
+            tiempo_s = time.time() - t0
+            st.session_state.historial.append({"role": "assistant", "content": respuesta})
+            st.session_state.ultima_pregunta_ts[len(st.session_state.historial) - 1] = tiempo_s
+            st.rerun()
