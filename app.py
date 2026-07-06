@@ -1576,8 +1576,12 @@ else:
             try:
                 respuesta = st.write_stream(chain.stream(payload))
             except Exception:
-                respuesta = chain.invoke(payload)
-                st.markdown(respuesta)
+                try:
+                    respuesta = chain.invoke(payload)
+                    st.markdown(respuesta)
+                except Exception:
+                    respuesta = "⚠️ No se pudo obtener respuesta en este momento. Es posible que se hayan agotado los tokens disponibles. Por favor, intenta de nuevo en unos minutos."
+                    st.warning(respuesta)
 
             tiempo_s = time.time() - t0
             st.session_state.historial.append({"role": "assistant", "content": respuesta})
